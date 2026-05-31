@@ -114,6 +114,12 @@ if is_online:
 else:
     st.markdown(f'<div class="status-badge offline">🔴 System Status: OFFLINE (Using {AI_ENGINE})</div>', unsafe_allow_html=True)
 
+st.info(
+    "⚠️ **Diagnostic Scope Limitations:**\n"
+    "Our targeted local AI model is strictly calibrated to detect **Anthracnose, CSSVD, Monilia, Phytophthora, Pod Borer, or Healthy pods**. "
+    "If your crop suffers from an unlisted disease, the offline AI may misclassify it. "
+    "Cloud API mode (Online) provides broader general disease recognition."
+)
 # ------------------------------------------------------------------------------
 # 4. CORE ASSETS: LOCAL MODEL & PREDEFINED REMEDY ENGINE
 # ------------------------------------------------------------------------------
