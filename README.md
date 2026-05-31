@@ -1,6 +1,6 @@
 # 🌱 CocoaGuard: Intelligent Field Diagnostics
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://cocoa-disease-classifier.streamlit.app)
+[![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://cocoa-disease-classifier.streamlit.app)
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-red.svg)
 ![TFLite](https://img.shields.io/badge/AI_Engine-TFLite-orange.svg)
