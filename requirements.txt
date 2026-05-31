@@ -1,0 +1,5 @@
+streamlit
+ai-edge-litert
+numpy
+Pillow
+google-genai
