@@ -36,7 +36,7 @@ If you want to clone this repository and run CocoaGuard on your own machine, fol
 **1. Clone the repository**
 ```bash
 git clone [https://github.com/sugumaranj/Cocoa-Disease-Classifier/](https://github.com/sugumaranj/Cocoa-Disease-Classifier/)
-cd CocoaGuard
+cd Cocoa-Disease-Classifier
 ```
 
 **2. Install the required dependencies**
