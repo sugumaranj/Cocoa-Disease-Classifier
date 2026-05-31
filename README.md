@@ -1,5 +1,6 @@
 # 🌱 CocoaGuard: Intelligent Field Diagnostics
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://cocoa-disease-classifier.streamlit.app)
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-red.svg)
 ![TFLite](https://img.shields.io/badge/AI_Engine-TFLite-orange.svg)
@@ -20,6 +21,14 @@
 
 ---
 
+## ⚠️ Diagnostic Scope & Limitations
+
+To ensure responsible agricultural practices and prevent misclassification of out-of-distribution data, CocoaGuard strictly defines its operational boundaries:
+* **Targeted Offline Scope:** The local TFLite edge model is explicitly calibrated to detect only **Anthracnose, CSSVD, Monilia, Phytophthora, Pod Borer,** or **Healthy** profiles.
+* **Cloud Anomaly Handling:** If a crop suffers from an unlisted disease, the system relies on the broader general recognition capabilities of the Google Cloud API (Online Mode) to prevent false-positive local diagnoses.
+
+---
+
 ## 🛠️ Technology Stack
 
 * **Frontend & Framework:** [Streamlit](https://streamlit.io/) (Mobile-optimized layout)
@@ -35,7 +44,7 @@ If you want to clone this repository and run CocoaGuard on your own machine, fol
 
 **1. Clone the repository**
 ```bash
-git clone [https://github.com/sugumaranj/Cocoa-Disease-Classifier/](https://github.com/sugumaranj/Cocoa-Disease-Classifier/)
+git clone [https://github.com/sugumaranj/Cocoa-Disease-Classifier.git](https://github.com/sugumaranj/Cocoa-Disease-Classifier.git)
 cd Cocoa-Disease-Classifier
 ```
 
