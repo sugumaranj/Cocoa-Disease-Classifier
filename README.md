@@ -35,7 +35,7 @@ If you want to clone this repository and run CocoaGuard on your own machine, fol
 
 **1. Clone the repository**
 ```bash
-git clone [https://github.com/YOUR_GITHUB_USERNAME/CocoaGuard.git](https://github.com/YOUR_GITHUB_USERNAME/CocoaGuard.git)
+git clone [https://github.com/sugumaranj/Cocoa-Disease-Classifier/](https://github.com/sugumaranj/Cocoa-Disease-Classifier/)
 cd CocoaGuard
 ```
 
