@@ -1,23 +1,27 @@
 # ==============================================================================
 # FILE: app.py
-# DESCRIPTION: Modern Mobile-First Cocoa Disease Diagnosis Dashboard
-#              Features: API Integration, Visual Metrics, & Downloadable Reports
-#              Dual-Engine: TFLite (Active for Cloud) / TensorFlow (Commented)
+# DESCRIPTION: Mobile-First Cocoa Disease Diagnosis Dashboard
+#              Features: 
+#              - Dual-Engine Architecture (Cloud API + Edge TFLite Fallback)
+#              - Pessimistic Safety Override (Prevents False 'Healthy' scans)
+#              - Session State Memory for UI Stability
+#              - Dynamic Theme UI (Auto Light/Dark Mode Compatibility)
 # ==============================================================================
 
 import os
 import socket
 import datetime
+import time 
+import concurrent.futures 
 import streamlit as st
 import numpy as np
 from PIL import Image
 from google import genai
 
 # ==============================================================================
-# ENGINE SELECTION: TFLite (Active) vs TensorFlow (Preserved in Comments)
+# 1. AI ENGINE INITIALIZATION
 # ==============================================================================
-
-# --- ACTIVE: Ultra-Lightweight TFLite Engine (For Free Cloud Deployment) ---
+# Attempt to load the local TensorFlow Lite model for offline edge processing.
 try:
     from ai_edge_litert.interpreter import Interpreter
     AI_ENGINE = "TFLite"
@@ -26,26 +30,79 @@ except Exception as e:
     TF_READY = False
     TF_ERROR_MSG = str(e)
 
-# --- PRESERVED: Heavy TensorFlow Engine (For Local PC execution) ---
-# try:
-#     import tensorflow as tf
-#     from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
-#     AI_ENGINE = "TensorFlow Keras"
-#     TF_READY = True
-# except Exception as e:
-#     TF_READY = False
-#     TF_ERROR_MSG = str(e)
+# Securely load the Google Gemini API key from Streamlit secrets.
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    client = None
 
 # ==============================================================================
-# GOOGLE GEMINI ONLINE API CONFIGURATION
+# 2. AGRONOMY DATABASE & CONSTANTS
 # ==============================================================================
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-client = genai.Client(api_key=GEMINI_API_KEY)
+CLASS_NAMES = ['Anthracnose', 'CSSVD', 'Healthy', 'Monilia', 'Phytophthora', 'PodBorer']
 
-# ------------------------------------------------------------------------------
-# 1. NETWORK HELPER FUNCTION
-# ------------------------------------------------------------------------------
+# Map technical model output names to simple, farmer-friendly terminology.
+SIMPLE_NAMES = {
+    "Anthracnose": "Anthracnose (Fungal Spots)",
+    "CSSVD": "Cocoa Swollen Shoot Virus (CSSVD)",
+    "Healthy": "Healthy Crop",
+    "Monilia": "Frosty Pod Rot",
+    "Phytophthora": "Black Pod Rot",
+    "PodBorer": "Cocoa Pod Borer (Pest)"
+}
+
+# Offline knowledge base utilized when the Cloud API is unreachable.
+LOCAL_REMEDY_DB = {
+    "Anthracnose": {
+        "priority": "HIGH",
+        "symptoms": "- Sunken dark lesions on pods.\n- Pinkish spores appear in wet conditions.",
+        "cultural": "- Prune shade trees to increase airflow.\n- Remove and burn infected pods immediately.",
+        "organic": "- Apply Neem oil extract.\n- Use Trichoderma-based biological fungicides.",
+        "chemical": "- Spray Copper Oxychloride (50% WP) @ 2.5g/L during rains."
+    },
+    "CSSVD": {
+        "priority": "CRITICAL",
+        "symptoms": "- Swollen stems and rounded, small pods.\n- Red vein banding on leaves.",
+        "cultural": "- Uproot and burn infected trees immediately.\n- Plant barrier crops to stop mealybug spread.",
+        "organic": "- Release natural predators (ladybugs) to control mealybug vectors.",
+        "chemical": "- No chemical cure for the virus.\n- Use mild insecticides to control mealybug vectors if needed."
+    },
+    "Healthy": {
+        "priority": "NONE",
+        "symptoms": "- Normal pod development.\n- No visible spots, rot, or lesions.",
+        "cultural": "- Maintain proper field sanitation.\n- Ensure good soil drainage.",
+        "organic": "- Apply organic compost to maintain soil microbiome.",
+        "chemical": "- Apply standard NPK fertilizer.\n- No fungicidal intervention needed."
+    },
+    "Monilia": {
+        "priority": "HIGH",
+        "symptoms": "- Premature ripening.\n- Thick, white/cream 'frosty' fungal spores on pod.",
+        "cultural": "- Remove and bury mummified pods weekly.\n- Reduce overhead canopy shade.",
+        "organic": "- Use biocontrol agents like Bacillus subtilis.",
+        "chemical": "- Spray Copper Hydroxide (77% WP) @ 2g/L on developing pods."
+    },
+    "Phytophthora": {
+        "priority": "CRITICAL",
+        "symptoms": "- Hard, dark black spots.\n- Rot rapidly spreads to engulf the entire pod.",
+        "cultural": "- Improve soil drainage trenches.\n- Harvest frequently; do not leave empty husks.",
+        "organic": "- Apply Trichoderma viride enriched compost around the base.",
+        "chemical": "- Spray Metalaxyl (8% WP) + Mancozeb (64% WP) @ 2.5g/L."
+    },
+    "PodBorer": {
+        "priority": "HIGH",
+        "symptoms": "- Premature patchy yellowing.\n- Tiny insect exit holes on the pod surface.",
+        "cultural": "- Enclose young pods in biodegradable sleeves.\n- Harvest strictly every 7 days.",
+        "organic": "- Use pheromone traps to disrupt mating.\n- Apply Neem-based sprays (Azadirachtin).",
+        "chemical": "- Spray Cypermethrin (10% EC) @ 1ml/L safely away from harvest."
+    }
+}
+
+# ==============================================================================
+# 3. UTILITY FUNCTIONS & CACHING
+# ==============================================================================
 def check_internet_connection():
+    """Validates if the device has an active internet connection for the Cloud API."""
     try:
         socket.create_connection(("1.1.1.1", 53), timeout=2)
         return True
@@ -53,333 +110,366 @@ def check_internet_connection():
         pass
     return False
 
-# ------------------------------------------------------------------------------
-# 2. PAGE CONFIGURATION & MODERN UI STYLING
-# ------------------------------------------------------------------------------
-st.set_page_config(
-    page_title="CocoaGuard 🌱",
-    page_icon="🌱",
-    layout="centered"
-)
+def fetch_gemini_diagnosis(prompt, img):
+    """Executes the Cloud API call to Gemini."""
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=[prompt, img])
+    return response.text.strip()
 
-st.markdown("""
-    <style>
-    .main {background-color: #f4f7f6;}
-    h1, h2, h3 {color: #1b5e20;}
-    .stButton>button {
-        width: 100%; 
-        border-radius: 8px; 
-        background-color: #2e7d32; 
-        color: white;
-        height: 3em;
-        font-weight: bold;
-        transition: 0.3s;
-    }
-    .stButton>button:hover {background-color: #1b5e20;}
-    .status-badge {
-        padding: 8px 12px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 0.9em;
-        display: inline-block;
-        margin-bottom: 20px;
-    }
-    .online {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
-    .offline {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
-    .container-box {
-        background-color: white;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        margin-bottom: 20px;
-    }
-    .metric-text { font-size: 1.2em; font-weight: bold; margin-bottom: 5px; }
-    </style>
-""", unsafe_allow_html=True)
+def clean_api_text(text, unwanted_prefix):
+    """Strips redundant headers returned by the LLM to ensure clean UI formatting."""
+    cleaned = text.replace(unwanted_prefix, "").replace(unwanted_prefix.lower(), "").strip()
+    if not cleaned.startswith("-") and not cleaned.startswith("•"):
+        cleaned = "- " + cleaned
+    return cleaned.lstrip(":").strip()
 
-# ------------------------------------------------------------------------------
-# 3. HEADER & STATUS DASHBOARD
-# ------------------------------------------------------------------------------
-st.title("🌱 CocoaGuard")
-st.markdown("### Intelligent Field Diagnostics")
+@st.cache_data
+def translate_text(text, target_lang):
+    """Caches translations in memory to prevent repetitive, costly API calls."""
+    if target_lang == "English" or not text or client is None: 
+        return text
+    try:
+        return client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=f"Translate this agricultural text to {target_lang}. Keep chemical names intact and maintain formatting.\n\n{text}"
+        ).text.strip()
+    except:
+        return text
 
-if not TF_READY:
-    st.error(f"🚨 Critical System Error: Local {AI_ENGINE} Engine failed to initialize.")
-    st.code(TF_ERROR_MSG)
-    st.stop()
-
-is_online = check_internet_connection()
-if is_online:
-    st.markdown('<div class="status-badge online">🟢 System Status: ONLINE (Cloud API Ready)</div>', unsafe_allow_html=True)
-else:
-    st.markdown(f'<div class="status-badge offline">🔴 System Status: OFFLINE (Using {AI_ENGINE})</div>', unsafe_allow_html=True)
-
-st.info(
-    "⚠️ **Diagnostic Scope Limitations:**\n"
-    "Our targeted local AI model is strictly calibrated to detect **Anthracnose, CSSVD, Monilia, Phytophthora, Pod Borer, or Healthy pods**. "
-    "If your crop suffers from an unlisted disease, the offline AI may misclassify it. "
-    "Cloud API mode (Online) provides broader general disease recognition."
-)
-# ------------------------------------------------------------------------------
-# 4. CORE ASSETS: LOCAL MODEL & PREDEFINED REMEDY ENGINE
-# ------------------------------------------------------------------------------
 @st.cache_resource
 def load_local_neural_network():
-    # --- ACTIVE: TFLite Model Loader ---
-    model_name = "max_efficiency_cocoa_model.tflite" # Assumes model is in the same folder for cloud deployment
-    if os.path.exists(model_name):
+    """Loads the TFLite model into memory once to optimize performance."""
+    if os.path.exists("max_efficiency_cocoa_model.tflite"):
         try:
-            interpreter = Interpreter(model_path=model_name)
+            interpreter = Interpreter(model_path="max_efficiency_cocoa_model.tflite")
             interpreter.allocate_tensors()
             return interpreter
-        except Exception as e:
+        except Exception:
             return None
     return None
 
-    # --- PRESERVED: TensorFlow Model Loader ---
-    # model_name = os.path.join("..", "notebooks", "v2b0", "max_efficiency_cocoa_model.keras")
-    # if os.path.exists(model_name):
-    #     try:
-    #         return tf.keras.models.load_model(model_name)
-    #     except Exception as e:
-    #         return None
-    # return None
-
 local_model = load_local_neural_network()
-CLASS_NAMES = ['Anthracnose', 'CSSVD', 'Healthy', 'Monilia', 'Phytophthora', 'PodBorer']
 
-OFFLINE_REMEDY_DB = {
-    "Anthracnose": "Prune infected pods and internal canopy branches immediately to boost airflow. Apply protective copper-based fungicides during heavy rainy periods.",
-    "CSSVD": "Cocoa Swollen Shoot Virus Disease has no chemical cure. Completely eradicate, uproot, and burn infected trees to halt vector (mealybug) transmission.",
-    "Healthy": "Your cocoa pod shows excellent health profiles. Maintain standard NPK fertilizer distribution arrays and regular scheduled soil moisture irrigation.",
-    "Monilia": "Collect, remove, and deeply bury all mummified pods every 7 days to break the fungal spore lifecycle. Prune overhead shade trees to drop humidity.",
-    "Phytophthora": "Instantly harvest and destroy black rotten pods. Spray target applications of copper hydroxide or metalaxyl fungicides at the onset of monsoon seasons.",
-    "PodBorer": "Enclose developing young pods using biodegradable plastic sleeves. Implement strict harvesting intervals every 7 days to break larval cycles."
-}
+# ==============================================================================
+# 4. APP CONFIGURATION & DYNAMIC CSS
+# ==============================================================================
+st.set_page_config(page_title="CocoaGuard 🌱", page_icon="🌱", layout="centered")
 
-# ------------------------------------------------------------------------------
-# 5. INTERACTIVE CORNER: CAMERA CAPTURE & FILE UPLOADER
-# ------------------------------------------------------------------------------
-with st.container():
-    st.markdown('<div class="container-box">', unsafe_allow_html=True)
-    st.markdown("#### 📸 Step 1: Image Capture")
+# Custom CSS utilizes CSS Variables (var(--...)) to natively support Light/Dark Modes.
+st.markdown("""
+    <style>
+    .stButton>button {
+        width: 100%; border-radius: 12px; background-color: #ff9800; color: white;
+        height: 3.5em; font-weight: 900; font-size: 1.1em;
+        box-shadow: 0 4px 15px rgba(255, 152, 0, 0.4); border: 2px solid #f57c00; transition: 0.3s;
+    }
+    .stButton>button:hover {background-color: #e65100; transform: scale(1.02);}
     
-    input_mode = st.radio("Select input method:", ["Camera Scanner", "Local File Browser"], horizontal=True)
-    uploaded_file = None
+    .status-badge {
+        padding: 6px 10px; border-radius: 15px; font-weight: bold; font-size: 0.8em;
+        display: inline-block; margin-bottom: 10px; text-align: center; width: 100%;
+    }
+    .api-badge {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
+    .local-badge {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
+    
+    .card {
+        background-color: var(--secondary-background-color); 
+        color: var(--text-color);
+        padding: 20px; border-radius: 12px;
+        border: 1px solid var(--border-color); margin-bottom: 20px;
+    }
+    
+    .disclaimer-box {
+        background-color: rgba(255, 193, 7, 0.15); 
+        color: var(--text-color); padding: 12px; 
+        border-radius: 8px; border-left: 5px solid #ffc107; margin-bottom: 15px;
+        font-size: 0.9em;
+    }
+    
+    .priority-CRITICAL { color: #d32f2f; font-weight: 900; background-color: #f8d7da; padding: 4px 8px; border-radius: 4px;}
+    .priority-HIGH { color: #ff9800; font-weight: 900; background-color: rgba(255, 152, 0, 0.2); padding: 4px 8px; border-radius: 4px;}
+    .priority-LOW { color: #0c5460; font-weight: 900; background-color: #d1ecf1; padding: 4px 8px; border-radius: 4px;}
+    .priority-NONE { color: #155724; font-weight: 900; background-color: #d4edda; padding: 4px 8px; border-radius: 4px;}
+    </style>
+""", unsafe_allow_html=True)
 
-    if input_mode == "Camera Scanner":
-        camera_img = st.camera_input("Position the cocoa pod clearly in frame:")
-        if camera_img: uploaded_file = camera_img
+# Initialize Session State memory. This prevents the app from clearing results 
+# during UI interactions.
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "batch_analytics" not in st.session_state:
+    st.session_state.batch_analytics = {}
+
+# ==============================================================================
+# 5. UI: SIDEBAR NAVIGATION & SETTINGS
+# ==============================================================================
+is_online = check_internet_connection() and client is not None
+
+with st.sidebar:
+    st.header("🌐 System Status")
+    if is_online:
+        st.markdown('<div class="status-badge api-badge">🟢 ONLINE (Cloud API)</div>', unsafe_allow_html=True)
     else:
-        file_img = st.file_uploader("Select an image from your device storage:", type=["jpg", "jpeg", "png"])
-        if file_img: uploaded_file = file_img
-
+        st.markdown(f'<div class="status-badge local-badge">🔴 OFFLINE ({AI_ENGINE})</div>', unsafe_allow_html=True)
+    
+    st.markdown("---")
     target_language = st.selectbox(
-        "🌍 Select Remedy Language (Requires Online Mode):",
+        "🌍 Output Language:",
         ["English", "Tamil (தமிழ்)", "Malayalam (മലയാളം)", "Hindi (हिन्दी)", "Telugu (తెలుగు)"]
     )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ------------------------------------------------------------------------------
-# 6. DATA PROCESSING & HYBRID INFERENCE ENGINE
-# ------------------------------------------------------------------------------
-if uploaded_file is not None:
-    st.markdown("#### 🔬 Step 2: System Evaluation")
-    raw_image = Image.open(uploaded_file)
-    st.image(raw_image, caption="Target Field Sample", use_container_width=True)
     
-    predicted_class = None
-    confidence_score = 0.0
-    second_choice_class = "Healthy"
-    api_success = False 
+    st.markdown("---")
+    st.header("📝 Farm Details")
+    global_farm_name = st.text_input("Farm Owner Name (Optional)")
+    global_location = st.text_input("Farm Location (Optional)")
+    
+    st.markdown("---")
+    with st.expander("⚙️ Advanced Settings (Local AI Only)"):
+        st.info("If the local AI confidence falls below this threshold, it overrides 'Healthy' to warn you of potential hidden threats.")
+        safety_margin = st.slider("Safety Override Threshold (%)", min_value=70, max_value=99, value=90, step=1)
 
-    # ==========================================================================
-    # ONLINE CLOUD VISION API
-    # ==========================================================================
-    if is_online:
-        with st.spinner("Analyzing via Google Cloud Vision API..."):
-            try:
-                prompt_instructions = (
-                    "Analyze this cocoa pod image. Identify if it displays symptoms of Anthracnose, "
-                    "CSSVD, Monilia, Phytophthora, PodBorer, or if it is completely Healthy. "
-                    "Respond with ONLY the exact class name from that list."
-                )
-                api_response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=[prompt_instructions, raw_image]
-                )
-                cleaned_pred = api_response.text.strip()
-                if cleaned_pred in CLASS_NAMES:
-                    predicted_class = cleaned_pred
-                    confidence_score = 100.0 
-                    api_success = True
-            except Exception as api_error:
-                st.warning("📡 Cloud API timeout/error. Instantly falling back to Local Offline Model...")
-                api_success = False
+# ==============================================================================
+# 6. UI: MAIN HOMEPAGE & IMAGE INPUT
+# ==============================================================================
+st.title("🌱 CocoaGuard")
+st.markdown("### Intelligent Field Diagnostics")
 
-    # --------------------------------------------------------------------------
-    # LOCAL MODEL INFERENCE PIPELINE
-    # --------------------------------------------------------------------------
-    if not api_success:
-        if local_model is None:
-            st.error(f"⚠️ **System Error:** Local {AI_ENGINE} model not found. Check file paths.")
-            st.stop()
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown("#### 📸 Step 1: Capture or Upload Images")
+
+input_mode = st.radio(
+    "Select Input Method:", 
+    ["Local File Upload / Phone Camera 📂", "Built-in Web Camera 📷"], 
+    horizontal=True
+)
+
+uploaded_files = []
+if input_mode == "Built-in Web Camera 📷":
+    camera_img = st.camera_input("Take a clear picture of the pod/leaf:")
+    if camera_img: uploaded_files.append(camera_img)
+else:
+    st.info("📱 **Mobile Users:** Tap 'Browse files' and select 'Take Photo' to use your phone's native camera with zoom!")
+    files = st.file_uploader("Upload image(s)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    if files: uploaded_files.extend(files)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ==============================================================================
+# 7. CORE DIAGNOSTIC ENGINE (Analyzes and saves to memory)
+# ==============================================================================
+if uploaded_files:
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+    with col_btn2:
+        btn_text = "🚀 RUN DIAGNOSTIC" if len(uploaded_files) == 1 else f"🚀 PROCESS {len(uploaded_files)} IMAGES"
+        run_btn = st.button(btn_text)
+
+    if run_btn:
+        # Clear previous session data for a fresh analysis
+        st.session_state.results = []
+        st.session_state.batch_analytics = {"Healthy Crop": 0, "Anthracnose (Fungal Spots)": 0, "Cocoa Swollen Shoot Virus (CSSVD)": 0, "Frosty Pod Rot": 0, "Black Pod Rot": 0, "Cocoa Pod Borer (Pest)": 0}
+        
+        progress_bar = st.progress(0)
+
+        for idx, file in enumerate(uploaded_files):
+            raw_image = Image.open(file)
             
-        with st.spinner(f"Processing offline via {AI_ENGINE} neural network..."):
-            img_resized = raw_image.resize((224, 224))
-            
-            # --- ACTIVE: TFLite Inference ---
-            img_array = np.array(img_resized, dtype=np.float32)
-            img_batch = np.expand_dims(img_array, axis=0)
-            
-            input_details = local_model.get_input_details()
-            output_details = local_model.get_output_details()
-            
-            local_model.set_tensor(input_details[0]['index'], img_batch)
-            local_model.invoke()
-            raw_predictions = local_model.get_tensor(output_details[0]['index'])
-            
-            highest_index = np.argmax(raw_predictions[0])
-            predicted_class = CLASS_NAMES[highest_index]
-            
-            preds = raw_predictions[0]
-            if np.max(preds) > 1.0: # Softmax conversion if output is raw logits
-                e_x = np.exp(preds - np.max(preds))
-                preds = e_x / e_x.sum(axis=0)
+            api_success = False 
+            diagnosis_source = ""
+            final_disease_name = ""
+            final_confidence = 0.0
+            threat_priority = "NONE"
+            top_preds = []
+            symp, cult, org, chem = "", "", "", ""
+
+            # ------------------------------------------------------------------
+            # STRATEGY A: PRIMARY CLOUD API (Gemini)
+            # ------------------------------------------------------------------
+            if is_online:
+                # Enforce a short sleep on batch uploads to respect free-tier API rate limits
+                if idx > 0: time.sleep(2.5) 
                 
-            confidence_score = preds[highest_index] * 100
-            cloned_predictions = preds.copy()
-            cloned_predictions[highest_index] = -1.0 
-            second_highest_index = np.argmax(cloned_predictions)
-            second_choice_class = CLASS_NAMES[second_highest_index]
+                with st.spinner("Analyzing via Cloud API..."):
+                    prompt = (
+                        "Analyze this cocoa crop image. Identify the disease (or state if Healthy). "
+                        "Keep answers VERY SHORT. Use bullet points (-) for every new sentence. "
+                        "Do NOT mention any universities or research stations. "
+                        "Do NOT include header text inside the sections (like 'Symptoms:'). "
+                        "For Chemical Control, you MUST extract and state the EXACT active chemical ingredients and EXACT dosage ratios. If no chemical is needed, state 'None'. "
+                        "Format EXACTLY using the pipe (|) character with 7 sections:\n"
+                        "Disease Name|Confidence %|Priority Level (CRITICAL, HIGH, MODERATE, LOW, NONE)|Symptoms Bullets|Cultural Control Bullets|Organic Control Bullets|Chemical Control Bullets"
+                    )
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(fetch_gemini_diagnosis, prompt, raw_image)
+                            raw_text = future.result(timeout=60)
+                        
+                        if "|" in raw_text:
+                            parts = raw_text.split("|")
+                            if len(parts) >= 7:
+                                final_disease_name = parts[0].strip()
+                                try: final_confidence = float(parts[1].replace("%","").strip())
+                                except: final_confidence = 95.0 
+                                
+                                threat_priority = parts[2].strip().upper()
+                                symp = clean_api_text(parts[3], "Symptoms:")
+                                cult = clean_api_text(parts[4], "Cultural Control:")
+                                org = clean_api_text(parts[5], "Organic Control:")
+                                chem = clean_api_text(parts[6], "Chemical Control:")
+                                
+                                api_success = True
+                                diagnosis_source = "Cloud API 🟢"
+                    except:
+                        api_success = False
 
-            # --- PRESERVED: TensorFlow Keras Inference ---
-            # img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
-            # img_batch = np.expand_dims(img_array, axis=0)
-            # img_preprocessed = preprocess_input(img_batch)
-            
-            # raw_predictions = local_model.predict(img_preprocessed)
-            # highest_index = np.argmax(raw_predictions[0])
-            
-            # predicted_class = CLASS_NAMES[highest_index]
-            # confidence_score = raw_predictions[0][highest_index] * 100
-            
-            # cloned_predictions = raw_predictions[0].copy()
-            # cloned_predictions[highest_index] = -1.0 
-            # second_highest_index = np.argmax(cloned_predictions)
-            # second_choice_class = CLASS_NAMES[second_highest_index]
-
-    # ------------------------------------------------------------------------------
-    # 7. UPGRADED MATRIX SAFETY THRESHOLDS & VISUAL METRICS
-    # ------------------------------------------------------------------------------
-    final_verified_diagnosis = predicted_class
-    
-    st.markdown("---")
-    # NEW: Visual Confidence Meter
-    st.markdown(f'<div class="metric-text">AI Confidence Score: {confidence_score:.1f}%</div>', unsafe_allow_html=True)
-    st.progress(int(confidence_score) / 100.0)
-    
-    if not api_success:
-        if confidence_score < 50.0:
-            st.warning(f"⚠️ **Low Confidence / Visual Overlap Suspected**")
-            st.info(f"The system leans toward **{predicted_class}**, but has strong secondary indicators of **{second_choice_class}**. Please check both options manually.")
-            final_verified_diagnosis = predicted_class if predicted_class != "Healthy" else second_choice_class
-        elif predicted_class == "Healthy" and confidence_score < 85.0:
-            st.warning(f"⚠️ **Uncertain Clear Signatures Detected**")
-            st.info(f"The system flags a tendency toward a clean pod, but underlying indicators display trace features of **{second_choice_class}**. An early infection might be starting.")
-            final_verified_diagnosis = second_choice_class 
-        elif predicted_class in ["Phytophthora", "Anthracnose", "Monilia"] and confidence_score < 75.0:
-            st.warning(f"⚠️ **Fungal Complex Warning**")
-            st.info(f"Detected fungal rot symptoms resembling **{predicted_class}**, but due to visual similarities, it could also be **{second_choice_class}**. Monitor pod closely.")
-            final_verified_diagnosis = predicted_class
-        else:
-            if predicted_class == "Healthy":
-                st.success(f"✅ **Verified: Healthy Crop Profile**")
-            else:
-                st.error(f"🚨 **Alert: Confirmed {predicted_class} Infection**")
-            final_verified_diagnosis = predicted_class
-    else:
-        if predicted_class == "Healthy":
-            st.success(f"✅ **Cloud Verified: Healthy Crop Profile**")
-        else:
-            st.error(f"🚨 **Cloud Alert: Confirmed {predicted_class} Infection**")
-
-    # ------------------------------------------------------------------------------
-    # 8. TREATMENT EXTRACTION & CLOUD TRANSLATION ENGINE
-    # ------------------------------------------------------------------------------
-    st.markdown("---")
-    st.markdown("#### 📋 Step 3: Targeted Field Remedy Action Plan")
-    
-    active_remedy_text = OFFLINE_REMEDY_DB[final_verified_diagnosis]
-    secondary_remedy_text = None
-    if not api_success and confidence_score < 50.0 and second_choice_class in OFFLINE_REMEDY_DB:
-        secondary_remedy_text = OFFLINE_REMEDY_DB[second_choice_class]
-
-    # Output text placeholders for the report generator
-    report_main_remedy = active_remedy_text
-    report_secondary_remedy = secondary_remedy_text
-
-    if target_language == "English":
-        st.info(f"**Primary Action Plan ({final_verified_diagnosis}):**\n{active_remedy_text}")
-        if secondary_remedy_text:
-            st.info(f"**Secondary Precautionary Plan ({second_choice_class}):**\n{secondary_remedy_text}")
-    else:
-        if is_online:
-            with st.spinner(f"Translating to {target_language}..."):
-                try:
-                    translation_prompt = f"Translate the following agricultural treatment into {target_language}. Keep technical names intact. Text: {active_remedy_text}"
-                    report_main_remedy = client.models.generate_content(
-                        model='gemini-2.5-flash', contents=translation_prompt
-                    ).text
-                    st.info(f"**Primary Action Plan ({final_verified_diagnosis}):**\n{report_main_remedy}")
+            # ------------------------------------------------------------------
+            # STRATEGY B: EDGE FALLBACK (TFLite Local Model)
+            # ------------------------------------------------------------------
+            if not api_success:
+                if local_model is None:
+                    st.error("System Error: Local offline model unavailable.")
+                    continue
                     
-                    if secondary_remedy_text:
-                        translation_prompt_sec = f"Translate this into {target_language}: {secondary_remedy_text}"
-                        report_secondary_remedy = client.models.generate_content(
-                            model='gemini-2.5-flash', contents=translation_prompt_sec
-                        ).text
-                        st.info(f"**Secondary Precautionary Plan ({second_choice_class}):**\n{report_secondary_remedy}")
-                except Exception as translation_error:
-                    st.warning("📡 Live Translation failed. Reverting to offline English data:")
-                    st.info(f"**Primary Action Plan ({final_verified_diagnosis}):**\n{active_remedy_text}")
-                    if secondary_remedy_text:
-                        st.info(f"**Secondary Precautionary Plan ({second_choice_class}):**\n{secondary_remedy_text}")
-        else:
-            st.warning(f"📡 Device Offline. Local language generation ({target_language}) requires internet. Displaying English reference guide below:")
-            st.info(f"**Primary Action Plan ({final_verified_diagnosis}):**\n{active_remedy_text}")
-            if secondary_remedy_text:
-                st.info(f"**Secondary Precautionary Plan ({second_choice_class}):**\n{secondary_remedy_text}")
+                diagnosis_source = "Local AI Model 🔴"
+                with st.spinner("Processing via Local Edge AI..."):
+                    
+                    # Pre-process image for the TensorFlow Lite interpreter
+                    img_resized = raw_image.resize((224, 224))
+                    img_array = np.array(img_resized, dtype=np.float32)
+                    img_batch = np.expand_dims(img_array, axis=0)
+                    
+                    input_details = local_model.get_input_details()
+                    output_details = local_model.get_output_details()
+                    local_model.set_tensor(input_details[0]['index'], img_batch)
+                    local_model.invoke()
+                    raw_predictions = local_model.get_tensor(output_details[0]['index'])[0]
+                    
+                    # Softmax calculation to convert output to percentages
+                    if np.max(raw_predictions) > 1.0: 
+                        probs = (np.exp(raw_predictions - np.max(raw_predictions)) / np.exp(raw_predictions - np.max(raw_predictions)).sum()) * 100
+                    else:
+                        probs = raw_predictions * 100
+                        
+                    sorted_indices = np.argsort(probs)[::-1]
+                    highest_index = sorted_indices[0]
+                    raw_predicted_class = CLASS_NAMES[highest_index]
+                    final_confidence = probs[highest_index]
+                    
+                    # PESSIMISTIC SAFETY OVERRIDE: Intercept rigid model bias toward false 'Healthy' readings
+                    if raw_predicted_class == "Healthy" and final_confidence < safety_margin:
+                        non_healthy_indices = [i for i in sorted_indices if CLASS_NAMES[i] != "Healthy"]
+                        highest_index = non_healthy_indices[0]
+                        raw_predicted_class = CLASS_NAMES[highest_index]
+                        final_confidence = probs[highest_index]
+                        top_preds.append(("Safety Override Triggered", 0.0, "N/A")) 
 
-    # ------------------------------------------------------------------------------
-    # 9. GENERATE DOWNLOADABLE REPORT
-    # ------------------------------------------------------------------------------
-    st.markdown("---")
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    final_disease_name = SIMPLE_NAMES[raw_predicted_class]
+                    threat_priority = LOCAL_REMEDY_DB[raw_predicted_class]["priority"]
+                    
+                    db_entry = LOCAL_REMEDY_DB[raw_predicted_class]
+                    symp, cult, org, chem = db_entry['symptoms'], db_entry['cultural'], db_entry['organic'], db_entry['chemical']
+
+                    # Capture alternative predictions if confidence is critically low
+                    if final_confidence < 70.0 and len(top_preds) == 0:
+                        for i in range(min(2, len(sorted_indices))):
+                            c_name = CLASS_NAMES[sorted_indices[i]]
+                            top_preds.append((SIMPLE_NAMES[c_name], probs[sorted_indices[i]], c_name))
+
+            # Push results to session state memory
+            st.session_state.results.append({
+                "image": raw_image,
+                "disease": final_disease_name,
+                "confidence": final_confidence,
+                "priority": threat_priority,
+                "symptoms": symp,
+                "cultural": cult,
+                "organic": org,
+                "chemical": chem,
+                "source": diagnosis_source,
+                "top_preds": top_preds
+            })
+
+            # Update batch analytics metrics
+            if final_disease_name in st.session_state.batch_analytics:
+                st.session_state.batch_analytics[final_disease_name] += 1
+            else:
+                st.session_state.batch_analytics[final_disease_name] = 1
+                
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+        st.success("✅ Analysis Complete!")
+
+# ==============================================================================
+# 8. RENDER RESULTS (Interactive Memory Phase)
+# ==============================================================================
+if st.session_state.get("results"):
     
-    # Build the text file content
-    txt_report = f"""========================================
-COCOAGUARD FIELD DIAGNOSIS REPORT
-========================================
-Date/Time:    {timestamp}
-Target Model: EfficientNetV2-B0 (Local/Cloud Hybrid)
-----------------------------------------
-[DIAGNOSIS RESULTS]
-Verified Class : {final_verified_diagnosis}
-Confidence     : {confidence_score:.2f}%
-Language Output: {target_language}
+    # Initialize the downloadable report array
+    report_lines = []
+    report_lines.append("========================================\n   COCOAGUARD FIELD DIAGNOSIS REPORT\n========================================")
+    report_lines.append(f"Date/Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report_lines.append(f"Farm Owner: {global_farm_name or 'Not Provided'}")
+    report_lines.append(f"Location: {global_location or 'Not Provided'}")
+    report_lines.append("\n[BATCH ANALYTICS SUMMARY]")
+    for k, v in st.session_state.batch_analytics.items():
+        if v > 0: report_lines.append(f"- {k}: {v} image(s)")
+    report_lines.append("----------------------------------------\n")
 
-[PRIMARY ACTION PLAN]
-{report_main_remedy}
-"""
-    if report_secondary_remedy:
-        txt_report += f"\n[SECONDARY WARNING PRECAUTION]\n{report_secondary_remedy}\n"
-    
-    txt_report += "========================================\nSystem built for precision agriculture."
+    # Render UI cards for each processed image
+    for idx, res in enumerate(st.session_state.results):
+        st.markdown(f"### 🔍 Analysis: Image {idx+1}")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        
+        # Display Image Thumbnail
+        col_img1, col_img2, col_img3 = st.columns([1, 2, 1])
+        with col_img2: st.image(res["image"], caption=f"Image {idx+1}", use_container_width=True)
+        
+        # Display Core Metrics
+        st.markdown(f"**Data Source:** {res['source']}")
+        st.subheader(f"Identified: {res['disease']}")
+        
+        priority_class = f"priority-{res['priority']}" if res['priority'] in ["CRITICAL", "HIGH", "LOW", "NONE"] else "priority-HIGH"
+        st.markdown(f'**Threat Priority:** <span class="{priority_class}">{res['priority']}</span>', unsafe_allow_html=True)
+        st.progress(int(res['confidence']) / 100.0)
+        st.markdown(f"**Confidence Score:** {res['confidence']:.1f}%")
 
-    # Download button widget
+        # Display Contextual Warnings
+        if res['top_preds'] and res['top_preds'][0][0] == "Safety Override Triggered":
+            st.warning(f"🛡️ **Safety Override Activated:** The model leaned towards 'Healthy', but failed to meet the safety margin. Displaying the most likely underlying infection.")
+        elif res['confidence'] < 70.0:
+            st.warning("⚠️ **Low Confidence Alert:** Displaying alternative possibilities.")
+
+        st.markdown("---")
+        st.markdown(f"#### 📋 Recommendations ({target_language})")
+        
+        disclaimer = "The Cloud API detects a broad range of diseases, but AI models can make mistakes." if "Cloud API" in res['source'] else "This local AI strictly identifies 6 common diseases. Unlisted diseases will cause inaccurate results."
+        st.markdown(f'<div class="disclaimer-box"><b>⚠️ Safety Warning:</b> {disclaimer} <b>Always ensure a visual inspection by an expert before applying chemicals.</b></div>', unsafe_allow_html=True)
+
+        # Apply translations (Cached to prevent repetitive API billing)
+        symp_t = translate_text(res['symptoms'], target_language)
+        cult_t = translate_text(res['cultural'], target_language)
+        org_t  = translate_text(res['organic'], target_language)
+        chem_t = translate_text(res['chemical'], target_language)
+
+        st.info(f"**Symptoms:**\n{symp_t}\n\n**Cultural Control:**\n{cult_t}\n\n**Organic Control:**\n{org_t}\n\n**Chemical Control:**\n{chem_t}")
+
+        # Display Top Alternative Predictions
+        if len(res['top_preds']) > 0 and res['top_preds'][0][0] != "Safety Override Triggered":
+            for i, (name, prob, raw_c) in enumerate(res['top_preds']):
+                st.markdown(f"**#{i+1} Potential Match:** {name} ({prob:.1f}%)")
+
+        st.markdown('</div>', unsafe_allow_html=True) 
+
+        # Append structured block to report export
+        report_lines.append(f"[IMAGE {idx+1} ANALYSIS]")
+        report_lines.append(f"Identified   : {res['disease']} ({res['priority']})")
+        report_lines.append(f"Confidence   : {res['confidence']:.1f}%")
+        report_lines.append(f"\nRecommendations:\nSymptoms:\n{symp_t}\nCultural:\n{cult_t}\nOrganic:\n{org_t}\nChemical:\n{chem_t}")
+        report_lines.append("\n----------------------------------------\n")
+
+    # Generate the Downloadable File dynamically 
+    full_report_text = "\n".join(report_lines)
     st.download_button(
-        label="📥 Download Field Report (.txt)",
-        data=txt_report,
-        file_name=f"CocoaGuard_Report_{final_verified_diagnosis}.txt",
+        label="📥 Download Complete Field Report (.txt)",
+        data=full_report_text,
+        file_name=f"CocoaGuard_Report_{datetime.datetime.now().strftime('%Y%m%d')}.txt",
         mime="text/plain"
     )
