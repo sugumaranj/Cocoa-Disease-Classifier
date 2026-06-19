@@ -473,4 +473,9 @@ with tab2:
                         st.markdown(chat_response.text)
                         st.session_state.chat_history.append({"role": "assistant", "content": chat_response.text})
                 except Exception as e:
-                    st.error("Error communicating with the Cocoa Doctor. Please try again.")
+                    error_msg = str(e)
+                    # Enterprise-grade error handling to check for API rate limits
+                    if "429" in error_msg or "quota" in error_msg.lower():
+                        st.error("⚠️ **API Busy:** The Cocoa Doctor is currently handling too many requests. Please wait 10 seconds and try again.")
+                    else:
+                        st.error(f"⚠️ **System Error:** {error_msg}")
