@@ -154,7 +154,7 @@ def fetch_local_weather(location_name, api_key):
     if not location_name or not api_key: 
         return None
     try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={location_name}&appid={api_key}&units=metric"
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={location_name}&appid={api_key}&units=metric"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             return response.json()
