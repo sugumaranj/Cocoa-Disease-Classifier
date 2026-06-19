@@ -1,7 +1,7 @@
 # ==============================================================================
 # FILE: app.py
 # DESCRIPTION: Mobile-First Cocoa Disease Diagnosis Dashboard & AI Chatbot
-#              Features: Interactive Treatment Calculator, AI Chatbot (Cocoa Doctor),
+#              Features: Proactive Weather Fungal Alerts, AI Chatbot (Cocoa Doctor),
 #                        Dual-Engine Architecture (Cloud API + Edge TFLite Fallback),
 #                        Dynamic Translation Caching, & UTF-8 Report Exports.
 # ==============================================================================
@@ -13,12 +13,14 @@ import time
 import concurrent.futures 
 import streamlit as st
 import numpy as np
+import requests  # Required for OpenWeatherMap API
 from PIL import Image
 from google import genai
 
 # ==============================================================================
 # 1. SETUP CLOUD API & LOCAL AI ENGINE
 # ==============================================================================
+# Attempt to load the local TensorFlow Lite model for offline edge processing.
 try:
     from ai_edge_litert.interpreter import Interpreter
     AI_ENGINE = "TFLite"
@@ -34,11 +36,16 @@ if GEMINI_API_KEY:
 else:
     client = None
 
+# Securely grab the OpenWeather API key from Streamlit secrets
+WEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
+
 # ==============================================================================
-# 2. DATABASES & CALCULATOR SETTINGS
+# 2. AGRONOMY DATABASES & CONSTANTS
 # ==============================================================================
+# The exact class labels our EfficientNetV2-B0 model was trained on
 CLASS_NAMES = ['Anthracnose', 'CSSVD', 'Healthy', 'Monilia', 'Phytophthora', 'PodBorer']
 
+# Farmer-friendly display names
 SIMPLE_NAMES = {
     "Anthracnose": "Anthracnose (Fungal Spots)",
     "CSSVD": "Cocoa Swollen Shoot Virus (CSSVD)",
@@ -48,14 +55,7 @@ SIMPLE_NAMES = {
     "PodBorer": "Cocoa Pod Borer (Pest)"
 }
 
-DOSAGE_MAP = {
-    "Anthracnose": {"chem": "Copper Oxychloride (50% WP)", "rate": 2.5, "unit": "g"},
-    "Monilia": {"chem": "Copper Hydroxide (77% WP)", "rate": 2.0, "unit": "g"},
-    "Phytophthora": {"chem": "Metalaxyl (8% WP) + Mancozeb (64% WP)", "rate": 2.5, "unit": "g"},
-    "PodBorer": {"chem": "Cypermethrin (10% EC)", "rate": 1.0, "unit": "ml"}
-}
-
-# Offline database (Updated with Botanical names for the UI)
+# Offline database (Utilized when the Cloud API is unreachable)
 LOCAL_REMEDY_DB = {
     "Anthracnose": {
         "botanical": "Colletotrichum spp.",
@@ -108,9 +108,10 @@ LOCAL_REMEDY_DB = {
 }
 
 # ==============================================================================
-# 3. BACKGROUND FUNCTIONS
+# 3. UTILITY FUNCTIONS & API CACHING
 # ==============================================================================
 def check_internet_connection():
+    """Validates if the device has an active internet connection for Cloud APIs."""
     try:
         socket.create_connection(("1.1.1.1", 53), timeout=2)
         return True
@@ -119,10 +120,12 @@ def check_internet_connection():
     return False
 
 def fetch_gemini_diagnosis(prompt, img):
+    """Executes the Cloud API call to Google Gemini."""
     response = client.models.generate_content(model='gemini-2.5-flash', contents=[prompt, img])
     return response.text.strip()
 
 def clean_api_text(text, unwanted_prefix):
+    """Strips redundant headers returned by the LLM to ensure clean UI formatting."""
     cleaned = text.replace(unwanted_prefix, "").replace(unwanted_prefix.lower(), "").strip()
     if not cleaned.startswith("-") and not cleaned.startswith("•"):
         cleaned = "- " + cleaned
@@ -130,7 +133,7 @@ def clean_api_text(text, unwanted_prefix):
 
 @st.cache_data
 def translate_text(text, target_lang):
-    """Caches translations. We pass the whole text block (including headers) so they get translated too!"""
+    """Caches translations in memory to prevent repetitive, costly API calls."""
     if target_lang == "English" or not text or client is None: 
         return text
     try:
@@ -141,8 +144,23 @@ def translate_text(text, target_lang):
     except:
         return text
 
+@st.cache_data(ttl=3600) 
+def fetch_local_weather(location_name, api_key):
+    """Fetches real-time weather data from OpenWeatherMap API and caches it for 1 hour."""
+    if not location_name or not api_key: 
+        return None
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={location_name}&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+    except:
+        return None
+    return None
+
 @st.cache_resource
 def load_local_neural_network():
+    """Loads the compiled TFLite model into memory once to optimize server performance."""
     if os.path.exists("max_efficiency_cocoa_model.tflite"):
         try:
             interpreter = Interpreter(model_path="max_efficiency_cocoa_model.tflite")
@@ -155,10 +173,11 @@ def load_local_neural_network():
 local_model = load_local_neural_network()
 
 # ==============================================================================
-# 4. APP DESIGN & CSS
+# 4. APP CONFIGURATION & DYNAMIC CSS
 # ==============================================================================
 st.set_page_config(page_title="CocoaGuard 🌱", page_icon="🌱", layout="centered")
 
+# Custom CSS utilizes CSS Variables (var(--...)) to natively support UI Light/Dark Modes.
 st.markdown("""
     <style>
     .stButton>button {
@@ -185,20 +204,16 @@ st.markdown("""
     .priority-LOW { color: #0c5460; font-weight: 900; background-color: #d1ecf1; padding: 4px 8px; border-radius: 4px;}
     .priority-NONE { color: #155724; font-weight: 900; background-color: #d4edda; padding: 4px 8px; border-radius: 4px;}
     .botanical-text { font-size: 0.85em; font-style: italic; color: #888; display: block; margin-top: 4px;}
-    .calc-box { 
-        background-color: rgba(46, 125, 50, 0.1); padding: 15px; border-radius: 10px; 
-        border: 1px solid #2e7d32; margin-top: 10px; color: var(--text-color);
-    }
     </style>
 """, unsafe_allow_html=True)
 
-# Session States
+# Initialize Session State memory. This prevents the app from clearing results during UI interaction.
 if "results" not in st.session_state: st.session_state.results = []
 if "batch_analytics" not in st.session_state: st.session_state.batch_analytics = {}
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
 # ==============================================================================
-# 5. UI: SIDEBAR
+# 5. UI: SIDEBAR NAVIGATION & SETTINGS
 # ==============================================================================
 is_online = check_internet_connection() and client is not None
 
@@ -213,10 +228,33 @@ with st.sidebar:
     st.markdown("---")
     st.header("📝 Farm Details")
     global_farm_name = st.text_input("Farm Owner Name")
-    global_location = st.text_input("Farm Location")
+    global_location = st.text_input("Farm Location (e.g., Coimbatore)")
     
+    # --- WEATHER & FUNGAL THREAT PANEL ---
+    if global_location and WEATHER_API_KEY:
+        weather_data = fetch_local_weather(global_location, WEATHER_API_KEY)
+        if weather_data:
+            humidity = weather_data['main']['humidity']
+            temp = weather_data['main']['temp']
+            condition = weather_data['weather'][0]['main'].lower()
+            
+            st.markdown("---")
+            st.header("⛈️ Local Weather Threat")
+            st.info(f"**{weather_data['name']}**: {temp}°C | Humidity: {humidity}%\n\n**Condition:** {condition.title()}")
+            
+            # Predictive Threat Logic for Cocoa Diseases
+            if humidity >= 80 and ("rain" in condition or "drizzle" in condition or "thunderstorm" in condition):
+                st.error("⚠️ **CRITICAL FUNGAL THREAT:** High humidity and rain detected. Preventive spraying for Black Pod Rot (Phytophthora) is highly recommended.")
+            elif humidity >= 80:
+                st.warning("⚠️ **Moderate Fungal Threat:** High humidity detected. Monitor pods closely for Frosty Pod Rot.")
+            else:
+                st.success("✅ **Low Fungal Threat:** Weather conditions are currently stable.")
+    elif global_location and not WEATHER_API_KEY:
+        st.caption("⚠️ OpenWeather API key missing in secrets. Cannot fetch weather.")
+
     st.markdown("---")
     with st.expander("⚙️ Advanced AI Settings"):
+        st.info("If the local AI confidence falls below this threshold, it overrides 'Healthy' to warn you of potential hidden threats.")
         safety_margin = st.slider("Safety Override Threshold (%)", min_value=70, max_value=99, value=90, step=1)
 
 # ==============================================================================
@@ -228,7 +266,7 @@ st.markdown("### Enterprise Agricultural Dashboard")
 tab1, tab2 = st.tabs(["📸 Field Diagnostics", "👨‍⚕️ Cocoa Doctor Chatbot"])
 
 # ------------------------------------------------------------------------------
-# TAB 1: FIELD DIAGNOSTICS & CALCULATOR
+# TAB 1: FIELD DIAGNOSTICS ENGINE
 # ------------------------------------------------------------------------------
 with tab1:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -243,6 +281,9 @@ with tab1:
         if files: uploaded_files.extend(files)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # --------------------------------------------------------------------------
+    # CORE DIAGNOSTIC ENGINE (Analyzes and saves to memory)
+    # --------------------------------------------------------------------------
     if uploaded_files:
         if st.button("🚀 RUN DIAGNOSTIC", use_container_width=True):
             st.session_state.results = []
@@ -257,11 +298,12 @@ with tab1:
                 symp, cult, org, chem = "", "", "", ""
                 top_preds = []
 
-                # CLOUD API ENGINE
+                # STRATEGY A: PRIMARY CLOUD API (Gemini)
                 if is_online:
+                    # Enforce a short sleep on batch uploads to respect free-tier API rate limits
                     if idx > 0: time.sleep(2.5) 
                     with st.spinner("Analyzing via Cloud API..."):
-                        # Prompt updated to extract Botanical Name strictly
+                        # Prompt specifically engineered to extract Botanical Name strictly
                         prompt = (
                             "Analyze this cocoa crop image. Identify the disease (or state if Healthy). "
                             "Keep answers VERY SHORT. Use bullet points (-) for every new sentence. Do NOT mention universities. "
@@ -289,7 +331,7 @@ with tab1:
                                     diagnosis_source = "Cloud API 🟢"
                         except: api_success = False
 
-                # EDGE TFLITE ENGINE FALLBACK
+                # STRATEGY B: EDGE FALLBACK (TFLite Local Model)
                 if not api_success:
                     if local_model is None:
                         st.error("System Error: Local offline model unavailable.")
@@ -297,6 +339,7 @@ with tab1:
                         
                     diagnosis_source = "Local AI Model 🔴"
                     with st.spinner("Processing via Local Edge AI..."):
+                        # Pre-process image for the TensorFlow Lite interpreter
                         img_resized = raw_image.resize((224, 224))
                         img_array = np.array(img_resized, dtype=np.float32)
                         img_batch = np.expand_dims(img_array, axis=0)
@@ -307,6 +350,7 @@ with tab1:
                         local_model.invoke()
                         raw_predictions = local_model.get_tensor(output_details[0]['index'])[0]
                         
+                        # Softmax calculation to convert output to percentages
                         if np.max(raw_predictions) > 1.0: 
                             probs = (np.exp(raw_predictions - np.max(raw_predictions)) / np.exp(raw_predictions - np.max(raw_predictions)).sum()) * 100
                         else:
@@ -317,7 +361,7 @@ with tab1:
                         raw_predicted_class = CLASS_NAMES[highest_index]
                         final_confidence = probs[highest_index]
                         
-                        # SAFETY OVERRIDE
+                        # PESSIMISTIC SAFETY OVERRIDE: Prevent false 'Healthy' readings
                         if raw_predicted_class == "Healthy" and final_confidence < safety_margin:
                             non_healthy_indices = [i for i in sorted_indices if CLASS_NAMES[i] != "Healthy"]
                             highest_index = non_healthy_indices[0]
@@ -340,6 +384,7 @@ with tab1:
                 # Combine text block so headers get translated properly
                 combo_text = f"**Symptoms:**\n{symp}\n\n**Cultural Control:**\n{cult}\n\n**Organic Control:**\n{org}\n\n**Chemical Control:**\n{chem}"
 
+                # Push results to session state memory
                 st.session_state.results.append({
                     "image": raw_image, "disease": final_disease_name, "botanical": botanical_name,
                     "confidence": final_confidence, "priority": threat_priority, 
@@ -354,7 +399,9 @@ with tab1:
                 
             st.success("✅ Analysis Complete!")
 
-    # RENDER DIAGNOSTIC RESULTS
+    # --------------------------------------------------------------------------
+    # RENDER RESULTS (Interactive Memory Phase)
+    # --------------------------------------------------------------------------
     if st.session_state.get("results"):
         report_lines = ["========================================", "   COCOAGUARD FIELD DIAGNOSIS REPORT", "========================================"]
         report_lines.append(f"Date/Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -392,29 +439,6 @@ with tab1:
             translated_combo = translate_text(res['combo_text'], target_language)
             st.info(translated_combo)
 
-            calc_report_text = ""
-            
-            # INTERACTIVE CALCULATOR
-            dis_name_lower = res["disease"].lower()
-            calc_data = None
-            if "anthracnose" in dis_name_lower: calc_data = DOSAGE_MAP["Anthracnose"]
-            elif "frosty" in dis_name_lower or "monilia" in dis_name_lower: calc_data = DOSAGE_MAP["Monilia"]
-            elif "black pod" in dis_name_lower or "phytophthora" in dis_name_lower: calc_data = DOSAGE_MAP["Phytophthora"]
-            elif "borer" in dis_name_lower or "pest" in dis_name_lower: calc_data = DOSAGE_MAP["PodBorer"]
-            
-            if calc_data:
-                st.markdown("#### 🧮 Treatment Calculator")
-                col_c1, col_c2 = st.columns(2)
-                with col_c1: acres = st.number_input("Spray Area (Acres)", min_value=0.1, value=1.0, step=0.5, key=f"acre_{idx}")
-                with col_c2: water = st.number_input("Water Volume (Liters/Acre)", min_value=50, value=200, step=10, key=f"water_{idx}")
-                
-                total_water = acres * water
-                total_chem = total_water * calc_data["rate"]
-                chem_display = f"{total_chem/1000:,.2f} kg" if calc_data["unit"] == "g" and total_chem >= 1000 else f"{total_chem/1000:,.2f} Liters" if calc_data["unit"] == "ml" and total_chem >= 1000 else f"{total_chem:,.1f} {calc_data['unit']}"
-                
-                st.markdown(f'<div class="calc-box">🧪 <b>Required Mix:</b> Add <b style="color:#4caf50; font-size:1.2em;">{chem_display}</b> of {calc_data["chem"]} to <b style="color:#29b6f6; font-size:1.2em;">{total_water:,.0f} Liters</b> of water.</div>', unsafe_allow_html=True)
-                calc_report_text = f"\n[Treatment Calculation for {acres} Acres]\n- Water Needed: {total_water:,.0f} Liters\n- Chemical Needed: {chem_display} of {calc_data['chem']}"
-
             st.markdown('</div>', unsafe_allow_html=True) 
 
             # Add to text file report
@@ -423,7 +447,6 @@ with tab1:
             report_lines.append(f"Botanical    : {res['botanical']}")
             report_lines.append(f"Confidence   : {res['confidence']:.1f}%\n")
             report_lines.append(f"Recommendations:\n{translated_combo}\n")
-            if calc_report_text: report_lines.append(calc_report_text)
             report_lines.append("\n----------------------------------------\n")
 
         # 📥 FIX: UTF-8 BOM encoding so Windows Notepad reads regional languages perfectly
