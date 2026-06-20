@@ -1,8 +1,8 @@
 # ==============================================================================
 # FILE: app.py
-# DESCRIPTION: Premium Mobile-First Cocoa Disease Diagnosis Dashboard
+# DESCRIPTION: Mobile-First Cocoa Disease Diagnosis Dashboard
 #              Features: Dual-Engine AI, Cocoa Doctor Chatbot, Weather Alerts,
-#                        Premium CSS Styling & Animations.
+#                        Premium CSS Styling & Animations, Centered Custom Logo.
 # ==============================================================================
 
 import os
@@ -19,6 +19,7 @@ from google import genai
 # ==============================================================================
 # 1. SETUP CLOUD API & LOCAL AI ENGINE
 # ==============================================================================
+# Try to load the local TensorFlow Lite model for offline edge processing
 try:
     from ai_edge_litert.interpreter import Interpreter
     AI_ENGINE = "TFLite"
@@ -27,12 +28,14 @@ except Exception as e:
     TF_READY = False
     TF_ERROR_MSG = str(e)
 
+# Securely grab the Google API key from Streamlit secrets
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     client = None
 
+# Securely grab the OpenWeather API key from Streamlit secrets
 WEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 
 
@@ -263,7 +266,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Session States
+# Session States memory
 if "results" not in st.session_state: st.session_state.results = []
 if "batch_analytics" not in st.session_state: st.session_state.batch_analytics = {}
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
@@ -275,7 +278,21 @@ if "chat_history" not in st.session_state: st.session_state.chat_history = []
 is_online = check_internet_connection() and client is not None
 
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/1892/1892749.png", width=60) # Small subtle icon
+    # 🌟 NEW LOGO IMPLEMENTATION 🌟
+    # Uses columns to perfectly center the logo for both mobile and desktop screens
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        try:
+            # Displays the logo file. Make sure your image is renamed to 'logo.png'
+            st.image("logo.png", use_container_width=True)
+        except Exception:
+            # Fallback text just in case the image file hasn't been uploaded yet
+            st.caption("(Upload logo.png)")
+            
+    # Clean spacing below the logo
+    st.markdown("<h2 style='text-align: center; margin-top: -15px;'>CocoaGuard</h2>", unsafe_allow_html=True)
+    st.markdown("---")
+
     st.header("🌐 System Status")
     if is_online: st.markdown('<div class="status-badge api-badge">🟢 ONLINE (Cloud API)</div>', unsafe_allow_html=True)
     else: st.markdown(f'<div class="status-badge local-badge">🔴 OFFLINE ({AI_ENGINE})</div>', unsafe_allow_html=True)
