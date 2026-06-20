@@ -2,7 +2,8 @@
 # FILE: app.py
 # DESCRIPTION: Mobile-First Cocoa Disease Diagnosis Dashboard
 #              Features: Dual-Engine AI, Cocoa Doctor Chatbot, Weather Alerts,
-#                        Premium CSS Styling & Animations, Centered Custom Logo.
+#                        Premium CSS Styling & Animations, Centered Custom Logo,
+#                        Robust Error Handling & RGB Image Normalization.
 # ==============================================================================
 
 import os
@@ -278,15 +279,13 @@ if "chat_history" not in st.session_state: st.session_state.chat_history = []
 is_online = check_internet_connection() and client is not None
 
 with st.sidebar:
-    # 🌟 NEW LOGO IMPLEMENTATION 🌟
+    # 🌟 LOGO IMPLEMENTATION 🌟
     # Uses columns to perfectly center the logo for both mobile and desktop screens
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         try:
-            # Displays the logo file. Make sure your image is renamed to 'logo.png'
             st.image("logo.png", use_container_width=True)
         except Exception:
-            # Fallback text just in case the image file hasn't been uploaded yet
             st.caption("(Upload logo.png)")
             
     # Clean spacing below the logo
@@ -343,7 +342,16 @@ with tab1:
             progress_bar = st.progress(0)
 
             for idx, file in enumerate(uploaded_files):
-                raw_image = Image.open(file)
+                try:
+                    # STRICT NORMALIZATION:
+                    # EfficientNetV2 natively requires raw 0-255 values (no / 255.0 scaling needed).
+                    # However, we MUST convert to 'RGB' to strip any Alpha (transparency) channels from PNGs, 
+                    # ensuring a strict (1, 224, 224, 3) matrix shape to prevent set_tensor ValueErrors.
+                    raw_image = Image.open(file).convert('RGB')
+                except Exception as e:
+                    st.error(f"⚠️ Error reading image file {file.name}. Please ensure it is a valid JPG or PNG.")
+                    continue
+                    
                 api_success = False 
                 diagnosis_source, final_disease_name, botanical_name, threat_priority = "", "", "", "NONE"
                 final_confidence = 0.0
@@ -388,38 +396,45 @@ with tab1:
                         
                     diagnosis_source = "Local AI Model 🔴"
                     with st.spinner("Processing via Local Edge AI..."):
-                        img_resized = raw_image.resize((224, 224))
-                        img_array = np.array(img_resized, dtype=np.float32)
-                        img_batch = np.expand_dims(img_array, axis=0)
-                        
-                        input_details = local_model.get_input_details()
-                        output_details = local_model.get_output_details()
-                        local_model.set_tensor(input_details[0]['index'], img_batch)
-                        local_model.invoke()
-                        raw_predictions = local_model.get_tensor(output_details[0]['index'])[0]
-                        
-                        if np.max(raw_predictions) > 1.0: 
-                            probs = (np.exp(raw_predictions - np.max(raw_predictions)) / np.exp(raw_predictions - np.max(raw_predictions)).sum()) * 100
-                        else:
-                            probs = raw_predictions * 100
+                        try:
+                            # Preprocess for TFLite
+                            img_resized = raw_image.resize((224, 224))
+                            img_array = np.array(img_resized, dtype=np.float32)
+                            img_batch = np.expand_dims(img_array, axis=0)
                             
-                        sorted_indices = np.argsort(probs)[::-1]
-                        highest_index = sorted_indices[0]
-                        raw_predicted_class = CLASS_NAMES[highest_index]
-                        final_confidence = probs[highest_index]
-                        
-                        if raw_predicted_class == "Healthy" and final_confidence < safety_margin:
-                            non_healthy_indices = [i for i in sorted_indices if CLASS_NAMES[i] != "Healthy"]
-                            highest_index = non_healthy_indices[0]
+                            input_details = local_model.get_input_details()
+                            output_details = local_model.get_output_details()
+                            
+                            local_model.set_tensor(input_details[0]['index'], img_batch)
+                            local_model.invoke()
+                            raw_predictions = local_model.get_tensor(output_details[0]['index'])[0]
+                            
+                            if np.max(raw_predictions) > 1.0: 
+                                probs = (np.exp(raw_predictions - np.max(raw_predictions)) / np.exp(raw_predictions - np.max(raw_predictions)).sum()) * 100
+                            else:
+                                probs = raw_predictions * 100
+                                
+                            sorted_indices = np.argsort(probs)[::-1]
+                            highest_index = sorted_indices[0]
                             raw_predicted_class = CLASS_NAMES[highest_index]
                             final_confidence = probs[highest_index]
-                            top_preds.append(("Safety Override Triggered", 0.0, "N/A")) 
+                            
+                            if raw_predicted_class == "Healthy" and final_confidence < safety_margin:
+                                non_healthy_indices = [i for i in sorted_indices if CLASS_NAMES[i] != "Healthy"]
+                                highest_index = non_healthy_indices[0]
+                                raw_predicted_class = CLASS_NAMES[highest_index]
+                                final_confidence = probs[highest_index]
+                                top_preds.append(("Safety Override Triggered", 0.0, "N/A")) 
 
-                        final_disease_name = SIMPLE_NAMES[raw_predicted_class]
-                        db_entry = LOCAL_REMEDY_DB[raw_predicted_class]
-                        botanical_name = db_entry["botanical"]
-                        threat_priority = db_entry["priority"]
-                        symp, cult, org, chem = db_entry['symptoms'], db_entry['cultural'], db_entry['organic'], db_entry['chemical']
+                            final_disease_name = SIMPLE_NAMES[raw_predicted_class]
+                            db_entry = LOCAL_REMEDY_DB[raw_predicted_class]
+                            botanical_name = db_entry["botanical"]
+                            threat_priority = db_entry["priority"]
+                            symp, cult, org, chem = db_entry['symptoms'], db_entry['cultural'], db_entry['organic'], db_entry['chemical']
+                            
+                        except Exception as e:
+                            st.error(f"⚠️ Edge AI processing failed: {str(e)}")
+                            continue
 
                 combo_text = f"**Symptoms:**\n{symp}\n\n**Cultural Control:**\n{cult}\n\n**Organic Control:**\n{org}\n\n**Chemical Control:**\n{chem}"
 
